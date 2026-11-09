@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Auto Video Editor</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<style>
+:root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#e9ecf1;--dim:#8b93a1;--accent:#5cc8a1}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 12px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+label{display:block;color:var(--dim);font-size:13px;margin:8px 0 4px}
+input,textarea,button{width:100%;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px}
+button{background:var(--accent);color:#06251a;border:0;font-weight:600;margin-top:10px}
+button:disabled{opacity:.5}
+pre{white-space:pre-wrap;color:var(--dim);font-size:12px;margin:8px 0 0;max-height:160px;overflow:auto}
+video{width:100%;border-radius:8px;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>Auto Video Editor</h1>
+
+<section>
+  <label>র ফুটেজ (একাধিক)</label><input id="raw" type="file" accept="video/*" multiple>
+  <label>রেফারেন্স ভিডিও (ঐচ্ছিক)</label><input id="ref" type="file" accept="video/*">
+  <label>মিউজিক (ঐচ্ছিক)</label><input id="music" type="file" accept="audio/*">
+  <label>Gemini API key (ফ্রি, শুধু আপনার ফোনে থাকবে)</label><input id="key" type="password">
+  <label>মডেল কোড (ঐচ্ছিক, খালি রাখলে অটো)</label><input id="model" placeholder="gemini-...">
+  <label>কী চান?</label><textarea id="ask" rows="3">৩০ সেকেন্ডের ফাস্ট রিল, ছোট ছোট কাট</textarea>
+  <button id="go">এডিট শুরু</button>
+  <pre id="log"></pre>
+</section>
+<section id="out" hidden><video id="vid" controls playsinline></video>
+  <label>বদল চান?</label><input id="fb" placeholder="যেমন: শুরুটা আরও দ্রুত করো">
+  <button id="redo">আবার এডিট</button></section>
+
+<script>
+const CONFIG = { model: 'gemini-2.0-flash', sampleFps: 2, cutThreshold: 18, maxClipSec: 60 };
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent += m + '\n'; };
+if (window.Telegram?.WebApp) { Telegram.WebApp.ready(); Telegram.WebApp.expand(); }
+
+/* ---------- 1. ANALYZE: সিন-কাট ও মোশন বের করা (ফোনেই, ফ্রি) ---------- */
+async function analyze(file) {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(file);
+  await new Promise(r => v.onloadedmetadata = r);
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  const dur = v.duration, step = 1 / CONFIG.sampleFps;
+  let prev = null, cuts = [0], motion = [];
+  for (let t = 0; t < dur; t += step) {
+    v.currentTime = t; await new Promise(r => v.onseeked = r);
+    g.drawImage(v, 0, 0, 32, 32);
+    const d = g.getImageData(0, 0, 32, 32).data;
+    if (prev) {
+      let s = 0; for (let i = 0; i < d.length; i += 4) s += Math.abs(d[i] - prev[i]);
+      const diff = s / 1024; motion.push(+diff.toFixed(1));
+      if (diff > CONFIG.cutThreshold) cuts.push(+t.toFixed(2));
+    }
+    prev = d;
+  }
+  URL.revokeObjectURL(v.src);
+  const avgMotion = motion.length ? motion.reduce((a, b) => a + b) / motion.length : 0;
+  return { duration: +dur.toFixed(2), width: v.videoWidth, height: v.videoHeight,
+           sceneCuts: cuts, avgCutLength: +(dur / cuts.length).toFixed(2), avgMotion: +avgMotion.toFixed(1) };
+}
+
+/* ---------- 2. PLAN: LLM-এর আউটপুটের কাঠামো ও যাচাই ---------- */
+// plan = { aspect:"9:16", clips:[{src:0,start:0,end:2.5,speed:1}], musicVolume:0.8 }
+function validatePlan(plan, infos) {
+  const errs = [];
+  if (!['9:16', '16:9', '1:1'].includes(plan.aspect)) errs.push('aspect অবশ্যই 9:16, 16:9 বা 1:1');
+  if (!Array.isArray(plan.clips) || !plan.clips.length) errs.push('clips খালি');
+  (plan.clips || []).forEach((c, i) => {
+    const info = infos[c.src];
+    if (!info) return errs.push(`clip ${i}: src ${c.src} নেই`);
+    if (!(c.start >= 0 && c.end > c.start && c.end <= info.duration + 0.05)) errs.push(`clip ${i}: সময় ভুল (ভিডিও ${info.duration}s)`);
+    if (c.speed !== undefined && !(c.speed >= 0.25 && c.speed <= 4)) errs.push(`clip ${i}: speed ০.২৫–৪ এর মধ্যে হবে`);
+  });
+  const total = (plan.clips || []).reduce((s, c) => s + (c.end - c.start) / (c.speed || 1), 0);
+  if (total > CONFIG.maxClipSec) errs.push(`মোট দৈর্ঘ্য ${total.toFixed(0)}s, সীমা ${CONFIG.maxClipSec}s`);
+  return errs;
+}
+
+/* ---------- 3. TOOLS: প্ল্যান থেকে FFmpeg কমান্ড বানিয়ে চালানো ---------- */
+let ff;
+async function loadFF() {
+  if (ff) return ff;
+  const { FFmpeg } = FFmpegWASM, { toBlobURL } = FFmpegUtil;
+  ff = new FFmpeg();
+  ff.on('log', ({ message }) => { if (/error/i.test(message)) log(message); });
+  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  await ff.load({ coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+                  wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm') });
+  return ff;
+}
+const SIZES = { '9:16': [720, 1280], '16:9': [1280, 720], '1:1': [720, 720] };
+
+async function render(plan, files, musicFile) {
+  const f = await loadFF(), { fetchFile } = FFmpegUtil;
+  const [W, H] = SIZES[plan.aspect];
+  const names = {};
+  for (const c of plan.clips) if (!names[c.src]) {
+    names[c.src] = `in${c.src}.mp4`; await f.writeFile(names[c.src], await fetchFile(files[c.src]));
+  }
+  const args = [], filters = [];
+  plan.clips.forEach((c, i) => {
+    args.push('-ss', String(c.start), '-t', String(c.end - c.start), '-i', names[c.src]);
+    filters.push(`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=30,setpts=(PTS-STARTPTS)/${c.speed || 1}[v${i}]`);
+  });
+  const n = plan.clips.length;
+  filters.push(`${plan.clips.map((_, i) => `[v${i}]`).join('')}concat=n=${n}:v=1:a=0[vout]`);
+  const out = ['-filter_complex', filters.join(';'), '-map', '[vout]'];
+  if (musicFile) {
+    await f.writeFile('music', await fetchFile(musicFile));
+    args.push('-i', 'music');
+    out.push('-map', `${n}:a`, '-af', `volume=${plan.musicVolume ?? 0.8}`, '-shortest');
+  }
+  out.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-pix_fmt', 'yuv420p', 'out.mp4');
+  await f.exec([...args, ...out]);
+  const data = await f.readFile('out.mp4');
+  return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
+/* ---------- 4. LLM: সাধারণ ভাষা থেকে প্ল্যান ---------- */
+const SYSTEM = `You are a video edit planner. Reply ONLY with JSON: {"aspect":"9:16|16:9|1:1","clips":[{"src":<file index>,"start":<sec>,"end":<sec>,"speed":<0.25-4>}],"musicVolume":<0-1>}.
+Use sceneCuts to start clips at natural cut points. Match the reference's avgCutLength for clip duration. Times must stay inside each file's duration.`;
+
+let MODELS = null, GOOD = null;
+async function listModels(key) {
+  if (MODELS) return MODELS;
+  const manual = $('model').value.trim();
+  if (manual) return (MODELS = [manual]);
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${key}`);
+  if (!r.ok) throw new Error('API key ভুল বা মডেল তালিকা পাওয়া যায়নি (' + r.status + ')');
+  const all = ((await r.json()).models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => m.name.replace('models/', ''))
+    .filter(n => /flash/.test(n) && !/(image|tts|live|audio|embed|robotics|omni|computer|native)/.test(n));
+  const rank = n => (/lite/.test(n) ? 0 : 2) + (/(preview|exp)/.test(n) ? 0 : 1); // স্থিতিশীল আগে
+  MODELS = all.sort((x, y) => rank(y) - rank(x) || y.localeCompare(x));
+  if (!MODELS.length) throw new Error('কোনো Flash মডেল পাওয়া যায়নি, মডেল ঘরে নাম দিন');
+  return MODELS;
+}
+
+async function askLLM(key, history) {
+  const list = GOOD ? [GOOD] : (await listModels(key)).slice(0, 8);
+  let lastErr = '';
+  for (const model of list) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents: history,
+                             generationConfig: { responseMimeType: 'application/json', temperature: 0.4 } })
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const t = j.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (t) { if (GOOD !== model) log('মডেল চলছে: ' + model); GOOD = model; return t; }
+      lastErr = model + ': খালি উত্তর'; continue;
+    }
+    lastErr = `${model}: ${r.status}`;
+    log(`${model} কাজ করেনি (${r.status}), পরেরটা...`);
+    GOOD = null;
+    if (![404, 429, 403, 400, 503].includes(r.status)) break;
+  }
+  throw new Error('কোনো মডেল কাজ করেনি। শেষ এরর: ' + lastErr);
+}
+
+/* ---------- 5. AGENT LOOP: বোঝা → প্ল্যান → যাচাই → ঠিক করা → রেন্ডার ---------- */
+let state = null; // ফিডব্যাকের জন্য আগের কথোপকথন ধরে রাখে
+
+async function run(userText) {
+  const key = $('key').value.trim(); if (!key) return log('API key দিন');
+  const files = [...$('raw').files]; if (!files.length) return log('র ফুটেজ দিন');
+  $('go').disabled = $('redo').disabled = true;
+  try {
+    if (!state) {
+      log('ভিডিও বিশ্লেষণ চলছে...');
+      const infos = []; for (const f of files) infos.push(await analyze(f));
+      const ref = $('ref').files[0] ? await analyze($('ref').files[0]) : null;
+      state = { infos, history: [{ role: 'user', parts: [{ text: JSON.stringify({ footage: infos, reference: ref }) }] }] };
+    }
+    state.history.push({ role: 'user', parts: [{ text: userText }] });
+    let plan;
+    for (let attempt = 1; attempt <= 3; attempt++) {           // ভুল হলে এরর ফেরত দিয়ে ৩ বার চেষ্টা
+      log(`প্ল্যান বানানো হচ্ছে (চেষ্টা ${attempt})...`);
+      const raw = await askLLM(key, state.history);
+      state.history.push({ role: 'model', parts: [{ text: raw }] });
+      let errs; try { plan = JSON.parse(raw); errs = validatePlan(plan, state.infos); } catch { errs = ['JSON ভুল']; }
+      if (!errs.length) break;
+      log('সমস্যা: ' + errs.join('; ')); plan = null;
+      state.history.push({ role: 'user', parts: [{ text: 'এই ভুলগুলো ঠিক করো: ' + errs.join('; ') }] });
+    }
+    if (!plan) return log('প্ল্যান বানানো যায়নি, আবার চেষ্টা করুন');
+    log('রেন্ডার চলছে (সময় লাগবে)...');
+    const blob = await render(plan, files, $('music').files[0]);
+    $('vid').src = URL.createObjectURL(blob); $('out').hidden = false; log('শেষ!');
+  } catch (e) { log('ত্রুটি: ' + e.message); }
+  $('go').disabled = $('redo').disabled = false;
+}
+$('go').onclick = () => { state = null; run($('ask').value); };
+$('redo').onclick = () => run($('fb').value);
+</script>
+</body>
+</html>
