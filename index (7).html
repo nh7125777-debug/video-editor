@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Auto Video Editor</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<style>
+:root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#e9ecf1;--dim:#8b93a1;--accent:#5cc8a1}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 12px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+label{display:block;color:var(--dim);font-size:13px;margin:8px 0 4px}
+input,select,textarea,button,a.btn{width:100%;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px}
+button{background:var(--accent);color:#06251a;border:0;font-weight:600;margin-top:10px}
+button:disabled{opacity:.5}
+pre{white-space:pre-wrap;color:var(--dim);font-size:12px;margin:8px 0 0;max-height:160px;overflow:auto}
+video{width:100%;border-radius:8px;margin-top:8px}
+a.btn{display:block;text-align:center;text-decoration:none;background:var(--accent);color:#06251a;font-weight:600;margin-top:10px}
+.chk{display:flex;align-items:center;gap:8px;color:var(--text);font-size:14px;margin:10px 0 0}.chk input{width:auto}
+</style>
+</head>
+<body>
+<h1>Auto Video Editor</h1>
+
+<section>
+  <label>র ফুটেজ (একাধিক)</label><input id="raw" type="file" accept="video/*" multiple>
+  <label>রেফারেন্স ভিডিও (ঐচ্ছিক)</label><input id="ref" type="file" accept="video/*">
+  <label>মিউজিক (ঐচ্ছিক)</label><input id="music" type="file" accept="audio/*">
+  <label>Gemini API key (ফ্রি, শুধু আপনার ফোনে থাকবে)</label><input id="key" type="password">
+  <label>মডেল কোড (ঐচ্ছিক, খালি রাখলে অটো)</label><input id="model" placeholder="gemini-...">
+  <label>কালার গ্রেডিং</label><select id="grade"><option value="vivid">ভিভিড (উজ্জ্বল)</option><option value="cinematic">সিনেমাটিক</option><option value="warm">ওয়ার্ম</option><option value="cool">কুল</option><option value="bw">সাদাকালো</option><option value="none">কিছু না</option></select>
+  <label>ট্রানজিশন</label><select id="trans"><option value="cut">কাট (বিটের জন্য সেরা)</option><option value="fade">ফেড</option><option value="slide">স্লাইড</option><option value="wipe">ওয়াইপ</option><option value="zoom">জুম</option></select>
+  <label>কোয়ালিটি</label><select id="q"><option value="good">ভালো (ধীর)</option><option value="fast">দ্রুত</option></select>
+  <label class="chk"><input type="checkbox" id="zoom" checked> স্লো জুম-ইন ইফেক্ট</label>
+  <label class="chk"><input type="checkbox" id="keep"> ফুটেজের মূল সাউন্ড রাখো</label>
+  <label>লক্ষ্য দৈর্ঘ্য (সেকেন্ড)</label><input id="len" type="number" value="30" min="5" max="60">
+  <label>কী চান?</label><textarea id="ask" rows="3">৩০ সেকেন্ডের ফাস্ট রিল, ছোট ছোট কাট</textarea>
+  <button id="go">এডিট শুরু</button>
+  <pre id="log"></pre>
+</section>
+<section id="out" hidden><video id="vid" controls playsinline></video>
+  <a id="dl" class="btn">ডাউনলোড</a>
+  <label>বদল চান?</label><input id="fb" placeholder="যেমন: শুরুটা আরও দ্রুত করো">
+  <button id="redo">আবার এডিট</button></section>
+
+<script>
+const CONFIG = { model: 'gemini-2.0-flash', sampleFps: 2, cutThreshold: 18, maxClipSec: 60 };
+const $ = id => document.getElementById(id);
+const log = m => { $('log').textContent += m + '\n'; };
+if (window.Telegram?.WebApp) { Telegram.WebApp.ready(); Telegram.WebApp.expand(); }
+
+/* ---------- 1. ANALYZE: সিন-কাট, কালো ফ্রেম, মোশন + Gemini-কে দেখানোর কন্টাক্ট শিট ---------- */
+async function analyze(file) {
+  const v = document.createElement('video');
+  v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(file);
+  await new Promise(r => v.onloadedmetadata = r);
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  const dur = v.duration, step = Math.max(1 / CONFIG.sampleFps, dur / 120);
+  // কন্টাক্ট শিট: সর্বোচ্চ ২০টা ছোট ছবি, প্রতিটায় সময় লেখা
+  const N = Math.min(20, Math.ceil(dur / step)), cols = 4, tw = 170, th = Math.round(tw * v.videoHeight / v.videoWidth);
+  const sheet = document.createElement('canvas'); sheet.width = cols * tw; sheet.height = Math.ceil(N / cols) * th;
+  const sg = sheet.getContext('2d'); sg.fillStyle = '#000'; sg.fillRect(0, 0, sheet.width, sheet.height);
+  const tileEvery = Math.max(1, Math.floor(Math.ceil(dur / step) / N)); let tile = 0, idx = 0;
+  let prev = null, cuts = [0], motion = [], dark = [], darkStart = null, peaks = [];
+  for (let t = 0; t < dur; t += step, idx++) {
+    v.currentTime = t; await new Promise(r => v.onseeked = r);
+    g.drawImage(v, 0, 0, 32, 32);
+    const d = g.getImageData(0, 0, 32, 32).data;
+    let luma = 0; for (let i = 0; i < d.length; i += 4) luma += d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11;
+    luma /= 1024;
+    if (luma < 22) { if (darkStart === null) darkStart = t; } else if (darkStart !== null) { dark.push([+darkStart.toFixed(1), +t.toFixed(1)]); darkStart = null; }
+    if (prev) {
+      let s = 0; for (let i = 0; i < d.length; i += 4) s += Math.abs(d[i] - prev[i]);
+      const diff = s / 1024; motion.push(diff); peaks.push([t, diff]);
+      if (diff > CONFIG.cutThreshold) cuts.push(+t.toFixed(2));
+    }
+    prev = d;
+    if (idx % tileEvery === 0 && tile < N) {
+      const x = (tile % cols) * tw, y = Math.floor(tile / cols) * th;
+      sg.drawImage(v, x, y, tw, th); sg.font = 'bold 16px sans-serif'; sg.fillStyle = '#ff0'; sg.strokeStyle = '#000'; sg.lineWidth = 3;
+      sg.strokeText(t.toFixed(1) + 's', x + 4, y + 18); sg.fillText(t.toFixed(1) + 's', x + 4, y + 18); tile++;
+    }
+  }
+  if (darkStart !== null) dark.push([+darkStart.toFixed(1), +dur.toFixed(1)]);
+  URL.revokeObjectURL(v.src);
+  const motionPeaks = []; peaks.sort((a, b) => b[1] - a[1]);
+  for (const [t] of peaks) { if (motionPeaks.length < 8 && motionPeaks.every(x => Math.abs(x - t) >= 2)) motionPeaks.push(+t.toFixed(1)); }
+  motionPeaks.sort((a, b) => a - b);
+  const avgMotion = motion.length ? motion.reduce((a, b) => a + b) / motion.length : 0;
+  return { duration: +dur.toFixed(2), width: v.videoWidth, height: v.videoHeight, orientation: v.videoWidth > v.videoHeight ? 'landscape' : 'portrait',
+           sceneCuts: cuts, avgCutLength: +(dur / cuts.length).toFixed(2), avgMotion: +avgMotion.toFixed(1), blackRanges: dark, motionPeaks,
+           sheet: sheet.toDataURL('image/jpeg', 0.6).split(',')[1] };
+}
+
+/* ---------- 2. PLAN: LLM-এর আউটপুটের কাঠামো ও যাচাই ---------- */
+// plan = { aspect:"9:16", fit:"blur"|"crop", clips:[{src:0,start:0,end:2.5,speed:1}], musicVolume:0.8 }
+function validatePlan(plan, infos) {
+  const errs = [];
+  if (!['9:16', '16:9', '1:1'].includes(plan.aspect)) errs.push('aspect অবশ্যই 9:16, 16:9 বা 1:1');
+  if (plan.fit && !['blur', 'crop'].includes(plan.fit)) errs.push('fit অবশ্যই blur বা crop');
+  if (!Array.isArray(plan.clips) || !plan.clips.length) errs.push('clips খালি');
+  (plan.clips || []).forEach((c, i) => {
+    const info = infos[c.src];
+    if (!info) return errs.push(`clip ${i}: src ${c.src} নেই`);
+    if (!(c.start >= 0 && c.end > c.start && c.end <= info.duration + 0.05)) errs.push(`clip ${i}: সময় ভুল (ভিডিও ${info.duration}s)`);
+    if (c.speed !== undefined && !(c.speed >= 0.25 && c.speed <= 4)) errs.push(`clip ${i}: speed ০.২৫–৪ এর মধ্যে হবে`);
+    (info.blackRanges || []).forEach(([s, e]) => { if (c.start < e && c.end > s) errs.push(`clip ${i} (src ${c.src}, ${c.start}-${c.end}s) কালো অংশের (${s}-${e}s) সাথে মিলে গেছে, সরাও`); });
+  });
+  const total = (plan.clips || []).reduce((s, c) => s + (c.end - c.start) / (c.speed || 1), 0);
+  const target = +$('len').value || 30;
+  const usable = infos.reduce((s, i) => s + i.duration - (i.blackRanges || []).reduce((a, [x, y]) => a + y - x, 0), 0);
+  const need = Math.min(target * 0.85, usable * 0.8);
+  if (total < need) errs.push(`মোট দৈর্ঘ্য ${total.toFixed(1)}s, কিন্তু লক্ষ্য ${target}s। আরও ক্লিপ যোগ করো বা ক্লিপ লম্বা করো`);
+  if (total > target * 1.15 + 1) errs.push(`মোট দৈর্ঘ্য ${total.toFixed(1)}s, লক্ষ্য ${target}s এর চেয়ে বেশি`);
+  return errs;
+}
+
+/* ---------- বিট ধরা ও কাট মেলানো ---------- */
+async function detectBeats(file) {
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await ac.decodeAudioData(await file.arrayBuffer());
+  const d = buf.getChannelData(0), hop = 512, sr = buf.sampleRate, n = Math.min(Math.floor(d.length / hop), Math.floor(60 * sr / hop));
+  const e = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < hop; j++) { const x = d[i * hop + j]; s += x * x; } e[i] = Math.sqrt(s / hop); }
+  const o = new Float32Array(n); for (let i = 1; i < n; i++) o[i] = Math.max(0, e[i] - e[i - 1]);
+  const fps = sr / hop; let best = 0, bl = Math.round(fps * 0.5);
+  for (let bpm = 80; bpm <= 160; bpm += 0.5) { const L = Math.round(fps * 60 / bpm); let s = 0; for (let i = L; i < n; i++) s += o[i] * o[i - L]; if (s > best) { best = s; bl = L; } }
+  let bp = 0, bs = -1; for (let p = 0; p < bl; p++) { let s = 0; for (let i = p; i < n; i += bl) s += o[i]; if (s > bs) { bs = s; bp = p; } }
+  return { bpm: Math.round(60 * fps / bl), period: bl / fps, offset: bp / fps };
+}
+function conform(plan, infos, bt) {
+  let unit = bt.period; while (unit < 0.75) unit *= 2;          // খুব ছোট কাট এড়াতে ২-৪ বিট একসাথে
+  const grid = t => { let k = Math.ceil((t - bt.offset) / unit - 1e-6); return bt.offset + k * unit; };
+  let t = 0; const clips = [];
+  for (const c of plan.clips) {
+    const sp = c.speed || 1, want = (c.end - c.start) / sp, max = infos[c.src].duration;
+    let nc = grid(t + Math.max(0.7, want - unit / 2)); if (nc < t + 0.7) nc += unit;
+    const dur = (nc - t) * sp; let s = c.start, e = s + dur;
+    if (e > max) { e = max; s = max - dur; }
+    if (s < 0) { clips.push(c); t += want; continue; }
+    clips.push({ ...c, start: +s.toFixed(2), end: +e.toFixed(2) }); t = nc;
+  }
+  return { ...plan, clips };
+}
+
+/* ---------- 3. TOOLS: প্ল্যান থেকে FFmpeg কমান্ড বানিয়ে চালানো ---------- */
+let ff; const FFLOG = [];
+async function loadFF() {
+  if (ff) return ff;
+  const { FFmpeg } = FFmpegWASM, { toBlobURL } = FFmpegUtil;
+  ff = new FFmpeg();
+  ff.on('log', ({ message }) => { if (/Stream #.*Audio/.test(message)) LASTAUDIO = true; FFLOG.push(message); if (FFLOG.length > 12) FFLOG.shift(); });
+  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm'; // মডিউল ওয়ার্কারের জন্য ESM লাগে
+  const wbase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+  await ff.load({ classWorkerURL: await toBlobURL(`${wbase}/814.ffmpeg.js`, 'text/javascript'),
+                  coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+                  wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm') });
+  return ff;
+}
+const SIZES = { '9:16': [720, 1280], '16:9': [1280, 720], '1:1': [720, 720] };
+/*BUILD_START*/
+const GRADES = { none: '', vivid: 'eq=contrast=1.12:saturation=1.35:brightness=0.02,unsharp=3:3:0.6',
+  cinematic: 'eq=contrast=1.15:saturation=0.9,colorbalance=rs=0.05:bs=-0.05:rh=-0.03:bh=0.06,vignette=PI/5',
+  warm: 'colorbalance=rs=0.08:gs=0.02:bs=-0.06:rh=0.05:bh=-0.05,eq=saturation=1.1',
+  cool: 'colorbalance=rs=-0.06:bs=0.08:rh=-0.04:bh=0.06,eq=saturation=1.1', bw: 'hue=s=0,eq=contrast=1.2' };
+const XF = { fade: 'fade', slide: 'slideleft', wipe: 'wipeleft', zoom: 'zoomin' };
+const atempo = s => { const f = []; while (s < 0.5) { f.push('atempo=0.5'); s /= 0.5; } while (s > 2) { f.push('atempo=2'); s /= 2; } f.push('atempo=' + s.toFixed(4)); return f.join(','); };
+// o: {W,H,names:{src:file},hasAudio:{src:bool},music:bool,keep:bool,grade,trans,zoom,fast}
+function buildCmd(plan, o) {
+  const { W, H } = o, n = plan.clips.length, td = XF[o.trans] && n > 1 ? 0.3 : 0;
+  const D = plan.clips.map(c => (c.end - c.start) / (c.speed || 1)), T = D.reduce((a, b) => a + b, 0);
+  const args = [], f = [];
+  plan.clips.forEach((c, i) => {
+    const sp = c.speed || 1, ext = i < n - 1 ? td : 0;
+    args.push('-ss', String(c.start), '-t', ((D[i] + ext) * sp).toFixed(3), '-i', o.names[c.src]);
+    const fin = `setsar=1,fps=30,setpts=(PTS-STARTPTS)/${sp}`;
+    const zoom = o.zoom && i % 2 === 0 ? `,scale=w='trunc(${W}*(1+0.08*t/${D[i].toFixed(2)})/2)*2':h='trunc(${H}*(1+0.08*t/${D[i].toFixed(2)})/2)*2':eval=frame,crop=${W}:${H}` : '';
+    const tail = `${zoom},format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=duration=${(D[i] + ext).toFixed(3)},setpts=PTS-STARTPTS[v${i}]`;
+    if (plan.fit === 'crop') f.push(`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},${fin}${tail}`);
+    else f.push(`[${i}:v]split[a${i}][b${i}];[a${i}]scale=90:160:force_original_aspect_ratio=increase,crop=90:160,boxblur=4:1,scale=${W}:${H}[bg${i}];` +
+      `[b${i}]scale=${W}:${H}:force_original_aspect_ratio=decrease[fg${i}];[bg${i}][fg${i}]overlay=(W-w)/2:(H-h)/2,${fin}${tail}`);
+    if (o.keep) f.push(o.hasAudio[c.src]
+      ? `[${i}:a]${atempo(sp)},asetpts=PTS-STARTPTS,atrim=0:${D[i].toFixed(3)},aresample=44100,aformat=channel_layouts=stereo[a${i}o]`
+      : `anullsrc=r=44100:cl=stereo,atrim=0:${D[i].toFixed(3)}[a${i}o]`);
+  });
+  if (td) { let cur = '[v0]', off = 0;
+    for (let i = 1; i < n; i++) { off += D[i - 1]; const lb = i === n - 1 ? '[vc]' : `[x${i}]`;
+      f.push(`${cur}[v${i}]xfade=transition=${XF[o.trans]}:duration=${td}:offset=${off.toFixed(3)}${lb}`); cur = lb; }
+  } else f.push(plan.clips.map((_, i) => `[v${i}]`).join('') + `concat=n=${n}:v=1:a=0[vc]`);
+  const g = GRADES[o.grade] || '';
+  f.push(`[vc]${g ? g + ',' : ''}fade=t=in:st=0:d=0.25,fade=t=out:st=${Math.max(0, T - 0.5).toFixed(2)}:d=0.5,format=yuv420p[vout]`);
+  const mv = (plan.musicVolume ?? 0.7) * (o.keep ? 0.5 : 1);
+  if (o.keep) f.push(plan.clips.map((_, i) => `[a${i}o]`).join('') + `concat=n=${n}:v=0:a=1[ac]`);
+  if (o.music) args.push('-i', o.musicName);
+  let a = null;
+  if (o.keep && o.music) { f.push(`[${n}:a]volume=${mv}[mu];[ac][mu]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[am]`); a = 'am'; }
+  else if (o.keep) a = 'ac';
+  else if (o.music) { f.push(`[${n}:a]volume=${mv},atrim=0:${T.toFixed(3)},asetpts=PTS-STARTPTS[am]`); a = 'am'; }
+  if (a) f.push(`[${a}]afade=t=out:st=${Math.max(0, T - 0.5).toFixed(2)}:d=0.5[aout]`);
+  const out = ['-filter_complex', f.join(';'), '-map', '[vout]'];
+  if (a) out.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '128k');
+  out.push('-c:v', 'libx264', '-preset', o.fast ? 'ultrafast' : 'veryfast', '-crf', o.fast ? '28' : '23', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-t', T.toFixed(3), 'out.mp4');
+  return { args: [...args, ...out], total: T };
+}
+/*BUILD_END*/
+
+let LASTAUDIO = false;
+async function render(plan, files, musicFile) {
+  log('ffmpeg লোড হচ্ছে (প্রথমবার ~৩০MB)...');
+  const f = await loadFF(), { fetchFile } = FFmpegUtil, [W, H] = SIZES[plan.aspect];
+  const keep = $('keep').checked, names = {}, hasAudio = {};
+  log('ফাইল পড়া হচ্ছে...');
+  for (const c of plan.clips) if (!names[c.src]) {
+    names[c.src] = `in${c.src}.mp4`; await f.writeFile(names[c.src], await fetchFile(files[c.src]));
+    if (keep) { LASTAUDIO = false; await f.exec(['-i', names[c.src]]); hasAudio[c.src] = LASTAUDIO; }
+  }
+  if (musicFile) await f.writeFile('music', await fetchFile(musicFile));
+  const { args, total } = buildCmd(plan, { W, H, names, hasAudio, music: !!musicFile, musicName: 'music', keep,
+    grade: $('grade').value, trans: $('trans').value, zoom: $('zoom').checked, fast: $('q').value === 'fast' });
+  log(`এনকোড শুরু (${total.toFixed(1)} সেকেন্ডের ভিডিও)...`);
+  const code = await f.exec(args);
+  if (code !== 0) throw new Error('ffmpeg ব্যর্থ, কোড ' + code);
+  const data = await f.readFile('out.mp4');
+  return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
+/* ---------- 4. LLM: সাধারণ ভাষা থেকে প্ল্যান ---------- */
+const SYSTEM = `You are a professional short-form video editor planning an edit. You receive per-file analysis (duration, orientation, sceneCuts, avgMotion, blackRanges) and a contact sheet image per file whose yellow labels are timestamps in seconds. LOOK at the sheets to understand the real content.
+Reply ONLY with JSON: {"aspect":"9:16|16:9|1:1","fit":"blur|crop","clips":[{"src":<file index>,"start":<sec>,"end":<sec>,"speed":<0.25-4>}],"musicVolume":<0-1>}.
+Master editing rules (always follow, whatever the footage):
+1. Default aspect 9:16 with fit "blur" (full frame centered on a blurred background, nothing cropped). Use fit "crop" only for talking-head or portrait footage that already fills the frame.
+2. Total length must reach targetSeconds (given in the data) within 10%. Count it: sum of (end-start)/speed over all clips. Add more clips until it fits.
+3. Open with a hook: first 2 seconds = the most exciting action moment you can see in the sheets.
+4. NEVER use menus, loading screens, lobby, result/victory/defeat banners, scoreboards, black or near-empty frames, or recording UI. Use only real action/content moments. Never overlap blackRanges.
+5. Pacing: fast cuts at the start (1-1.5s), about 2s in the middle, last clip slightly longer. Build clips around motionPeaks (start about 0.3s before a peak) and start at sceneCuts when possible. Apart from the opening hook, keep clips of the same file in chronological order so the edit feels like a story, not random jumps.
+6. Use speed 1.2-1.5 on high-motion clips, speed 0.75 on the final impact clip. Otherwise 1.
+7. Spread clips across all files and never reuse the same part twice.
+8. musicVolume 0.7. All times must stay inside each file's duration.
+The user's extra instruction below overrides these defaults where they conflict.`;
+
+let MODELS = null, GOOD = null;
+async function listModels(key) {
+  if (MODELS) return MODELS;
+  const manual = $('model').value.trim();
+  if (manual) return (MODELS = [manual]);
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${key}`);
+  if (!r.ok) throw new Error('API key ভুল বা মডেল তালিকা পাওয়া যায়নি (' + r.status + ')');
+  const all = ((await r.json()).models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => m.name.replace('models/', ''))
+    .filter(n => /flash/.test(n) && !/(image|tts|live|audio|embed|robotics|omni|computer|native)/.test(n));
+  const rank = n => (/lite/.test(n) ? 0 : 2) + (/(preview|exp)/.test(n) ? 0 : 1); // স্থিতিশীল আগে
+  MODELS = all.sort((x, y) => rank(y) - rank(x) || y.localeCompare(x));
+  if (!MODELS.length) throw new Error('কোনো Flash মডেল পাওয়া যায়নি, মডেল ঘরে নাম দিন');
+  return MODELS;
+}
+
+async function askLLM(key, history) {
+  const list = GOOD ? [GOOD] : (await listModels(key)).slice(0, 8);
+  let lastErr = '';
+  for (const model of list) {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents: history,
+                             generationConfig: { responseMimeType: 'application/json', temperature: 0.4 } })
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const t = j.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (t) { if (GOOD !== model) log('মডেল চলছে: ' + model); GOOD = model; return t; }
+      lastErr = model + ': খালি উত্তর'; continue;
+    }
+    lastErr = `${model}: ${r.status}`;
+    log(`${model} কাজ করেনি (${r.status}), পরেরটা...`);
+    GOOD = null;
+    if (![404, 429, 403, 400, 503].includes(r.status)) break;
+  }
+  throw new Error('কোনো মডেল কাজ করেনি। শেষ এরর: ' + lastErr);
+}
+
+/* ---------- 5. AGENT LOOP: বোঝা → প্ল্যান → যাচাই → ঠিক করা → রেন্ডার ---------- */
+let state = null; // ফিডব্যাকের জন্য আগের কথোপকথন ধরে রাখে
+
+async function run(userText) {
+  const key = $('key').value.trim(); if (!key) return log('API key দিন');
+  const files = [...$('raw').files]; if (!files.length) return log('র ফুটেজ দিন');
+  $('go').disabled = $('redo').disabled = true;
+  try {
+    if (!state) {
+      log('ভিডিও বিশ্লেষণ চলছে...');
+      const infos = []; for (const f of files) { infos.push(await analyze(f)); log(`ফাইল ${infos.length}/${files.length} বিশ্লেষণ শেষ`); }
+      const ref = $('ref').files[0] ? await analyze($('ref').files[0]) : null;
+      const strip = i => { const { sheet, ...rest } = i; return rest; };
+      const parts = [{ text: JSON.stringify({ targetSeconds: +$('len').value || 30, footage: infos.map(strip), reference: ref ? strip(ref) : null }) }];
+      infos.forEach((i, k) => { parts.push({ text: `Contact sheet of footage file ${k}:` }, { inlineData: { mimeType: 'image/jpeg', data: i.sheet } }); });
+      state = { infos, history: [{ role: 'user', parts }] };
+    }
+    state.history.push({ role: 'user', parts: [{ text: userText }] });
+    let plan;
+    for (let attempt = 1; attempt <= 3; attempt++) {           // ভুল হলে এরর ফেরত দিয়ে ৩ বার চেষ্টা
+      log(`প্ল্যান বানানো হচ্ছে (চেষ্টা ${attempt})...`);
+      const raw = await askLLM(key, state.history);
+      state.history.push({ role: 'model', parts: [{ text: raw }] });
+      let errs; try { plan = JSON.parse(raw); errs = validatePlan(plan, state.infos); } catch { errs = ['JSON ভুল']; }
+      if (!errs.length) break;
+      log('সমস্যা: ' + errs.join('; ')); plan = null;
+      state.history.push({ role: 'user', parts: [{ text: 'এই ভুলগুলো ঠিক করো: ' + errs.join('; ') }] });
+    }
+    if (!plan) return log('প্ল্যান বানানো যায়নি, আবার চেষ্টা করুন');
+    const music = $('music').files[0];
+    log('প্ল্যান: ' + plan.clips.map(c => `ফা${c.src} ${c.start}-${c.end}s${c.speed && c.speed !== 1 ? ' ×' + c.speed : ''}`).join(' | '));
+    if (music) {
+      try {
+        const bt = await detectBeats(music), snapped = conform(plan, state.infos, bt);
+        if (!validatePlan(snapped, state.infos).length) { plan = snapped; log(`বিটে কাট মেলানো হয়েছে (BPM ~${bt.bpm})`); }
+        else log('বিটে মেলানো গেল না, আগের প্ল্যানই থাকছে');
+      } catch (e) { log('মিউজিকের বিট ধরা যায়নি'); }
+    }
+    log('রেন্ডার চলছে (সময় লাগবে)...');
+    const blob = await render(plan, files, $('music').files[0]);
+    const url = URL.createObjectURL(blob); $('vid').src = url; $('dl').href = url; $('dl').download = 'edited.mp4'; $('out').hidden = false; log('শেষ!');
+  } catch (e) { log('ত্রুটি: ' + (e?.message || e || 'অজানা (সম্ভবত মেমরি কম)')); if (FFLOG.length) log('ffmpeg লগ:\n' + FFLOG.slice(-6).join('\n')); }
+  $('go').disabled = $('redo').disabled = false;
+}
+$('go').onclick = () => { state = null; run($('ask').value); };
+$('redo').onclick = () => run($('fb').value);
+</script>
+</body>
+</html>
