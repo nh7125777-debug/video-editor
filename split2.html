@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Split Screen Editor</title>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<style>
+:root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#e9ecf1;--dim:#8b93a1;--accent:#5cc8a1}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 12px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+h2{font-size:15px;margin:0 0 6px;color:var(--accent)}
+label{display:block;color:var(--dim);font-size:13px;margin:8px 0 2px}
+input,select,button,a.btn{width:100%;display:block;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px}
+input[type=range]{padding:0;border:0}
+button,a.btn{background:var(--accent);color:#06251a;border:0;font-weight:600;margin-top:10px;text-align:center;text-decoration:none}
+button:disabled{opacity:.5}
+.chk{display:flex;align-items:center;gap:8px;color:var(--text);margin:8px 0 0}.chk input{width:auto}
+canvas,video{width:100%;max-width:300px;display:block;margin:8px auto 0;border-radius:8px;background:#000}
+pre{white-space:pre-wrap;color:var(--dim);font-size:12px;margin:8px 0 0;max-height:150px;overflow:auto}
+</style>
+</head>
+<body>
+<h1>Split Screen Editor</h1>
+
+<section>
+  <h2>স্লট ১: উপরের ভিডিও</h2>
+  <input id="v1" type="file" accept="video/*">
+  <label>জুম: <b id="z1v">1.0</b>x (১ = ফ্রেম ভরে, বেশি = আরও জুম)</label><input id="z1" type="range" min="1" max="2.5" step="0.05" value="1">
+  <label>বাঁ ↔ ডান</label><input id="x1" type="range" min="0" max="1" step="0.02" value="0.5">
+  <label>ওপর ↔ নিচ</label><input id="y1" type="range" min="0" max="1" step="0.02" value="0.5">
+  <small id="c1" style="color:var(--dim)"></small>
+  <label class="chk"><input type="checkbox" id="a1"> এই ভিডিওর সাউন্ড রাখো</label>
+</section>
+
+<section>
+  <h2>স্লট ২: নিচের ভিডিও</h2>
+  <input id="v2" type="file" accept="video/*">
+  <label>জুম: <b id="z2v">1.0</b>x</label><input id="z2" type="range" min="1" max="2.5" step="0.05" value="1">
+  <label>বাঁ ↔ ডান</label><input id="x2" type="range" min="0" max="1" step="0.02" value="0.5">
+  <label>ওপর ↔ নিচ (০ = ওপরের অংশ দেখাবে)</label><input id="y2" type="range" min="0" max="1" step="0.02" value="0">
+  <small id="c2" style="color:var(--dim)"></small>
+  <label class="chk"><input type="checkbox" id="a2"> এই ভিডিওর সাউন্ড রাখো</label>
+</section>
+
+<section>
+  <h2>ব্যাকগ্রাউন্ড মিউজিক</h2>
+  <input id="mu" type="file" accept="audio/*,video/*">
+  <label>মিউজিক কত সেকেন্ড থেকে শুরু হবে</label><input id="ms" type="number" value="0" min="0">
+  <label>ভলিউম: <b id="mvv">1.0</b></label><input id="mv" type="range" min="0.1" max="1.5" step="0.1" value="1">
+</section>
+
+<section>
+  <h2>সেটিংস</h2>
+  <label class="chk"><input type="checkbox" id="ac" checked> ভিডিওর কালো বর্ডার অটো কেটে ফেলো</label>
+  <label>ভিডিওর দৈর্ঘ্য</label>
+  <select id="len"><option value="top">স্লট ১ এর সমান</option><option value="bottom">স্লট ২ এর সমান</option><option value="min">যেটা ছোট</option><option value="max">যেটা বড়</option><option value="manual">নিজে লিখব</option></select>
+  <input id="lenv" type="number" value="20" min="3" max="120" hidden>
+  <label>ছোট ভিডিও শেষ হলে</label>
+  <select id="short"><option value="loop">আবার শুরু থেকে চলবে</option><option value="freeze">শেষ ফ্রেমে থেমে থাকবে</option></select>
+  <label>কোয়ালিটি</label>
+  <select id="q"><option value="hd720">৭২০×১২৮০ (দ্রুত, নিরাপদ)</option><option value="fhd">১০৮০×১৯২০ (রেফারেন্সের মাপ, ধীর, ক্র্যাশ করতে পারে)</option></select>
+</section>
+
+<section>
+  <h2>লেআউট প্রিভিউ</h2>
+  <canvas id="pv"></canvas>
+  <label>প্রিভিউ সময়: <b id="ptv">0.5</b>s</label><input id="pt" type="range" min="0" max="10" step="0.1" value="0.5">
+  <button id="go">ভিডিও বানাও</button>
+  <pre id="log"></pre>
+</section>
+
+<section id="out" hidden><video id="res" controls playsinline></video><a id="dl" class="btn">ডাউনলোড</a></section>
+
+<script>
+const $ = id => document.getElementById(id), log = m => { $('log').textContent += m + '\n'; $('log').scrollTop = 1e9; };
+
+/* ---------- লেআউট (রেফারেন্স ভিডিও থেকে মাপা, ১০৮০×১৯২০ এ): ওপরে কালো ১৪px, স্লট ১: ১৪–৯৩৬, স্লট ২: ৯৩৬–১৮৫৮ ---------- */
+const even = n => Math.round(n / 2) * 2;
+function layout(q) {
+  const k = q === 'fhd' ? 1 : 2 / 3, W = even(1080 * k), H = even(1920 * k);
+  const h = even(922 * k), y1 = even(14 * k), y2 = even(936 * k);
+  return { W, H, h, y1, y2 };
+}
+/*BUILD_START*/
+// o: {W,H,h,y1,y2,T,s1:{z,x,y,keep},s2:{z,x,y,keep},music:bool,mstart,mvol,freeze}
+function slotFilter(i, s, o, label) {
+  const Z = s.z.toFixed(3);
+  const c = s.cr, cr = c && c.w * c.h < 0.99 ? `crop=trunc(iw*${c.w.toFixed(4)}/2)*2:trunc(ih*${c.h.toFixed(4)}/2)*2:trunc(iw*${c.x.toFixed(4)}/2)*2:trunc(ih*${c.y.toFixed(4)}/2)*2,` : '';
+  const fin = o.freeze ? `,tpad=stop_mode=clone:stop_duration=${o.T.toFixed(2)}` : '';
+  return `[${i}:v]${cr}scale=${o.W}:${o.h}:force_original_aspect_ratio=increase,scale=trunc(iw*${Z}/2)*2:trunc(ih*${Z}/2)*2,` +
+    `crop=${o.W}:${o.h}:(iw-${o.W})*${s.x}:(ih-${o.h})*${s.y},setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS${fin},trim=duration=${o.T.toFixed(3)},setpts=PTS-STARTPTS[${label}]`;
+}
+function buildSplit(o) {
+  const loop = o.freeze ? [] : ['-stream_loop', '-1'], T = o.T.toFixed(3), args = [], f = [];
+  args.push(...loop, '-t', T, '-i', 'in1.mp4', ...loop, '-t', T, '-i', 'in2.mp4');
+  if (o.music) args.push('-stream_loop', '-1', '-i', 'music');
+  f.push(slotFilter(0, o.s1, o, 't'), slotFilter(1, o.s2, o, 'b'));
+  f.push(`color=c=black:s=${o.W}x${o.H}:r=30:d=${T}[bg];[bg][t]overlay=0:${o.y1}[o1];[o1][b]overlay=0:${o.y2},fade=t=in:st=0:d=0.15,format=yuv420p[vout]`);
+  const parts = [];
+  if (o.s1.keep && o.has1) { f.push(`[0:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:${T},asetpts=PTS-STARTPTS[g1]`); parts.push('[g1]'); }
+  if (o.s2.keep && o.has2) { f.push(`[1:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:${T},asetpts=PTS-STARTPTS[g2]`); parts.push('[g2]'); }
+  if (o.music) { f.push(`[2:a]atrim=start=${o.mstart},asetpts=PTS-STARTPTS,atrim=0:${T},volume=${o.mvol},aresample=44100,aformat=channel_layouts=stereo[mu]`); parts.push('[mu]'); }
+  let a = null;
+  if (parts.length > 1) { f.push(`${parts.join('')}amix=inputs=${parts.length}:duration=longest:dropout_transition=0:normalize=0[mx]`); a = 'mx'; }
+  else if (parts.length === 1) a = parts[0].slice(1, -1);
+  if (a) f.push(`[${a}]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,afade=t=out:st=${Math.max(0, o.T - 0.4).toFixed(2)}:d=0.4[aout]`);
+  const out = ['-filter_complex', f.join(';'), '-map', '[vout]'];
+  if (a) out.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
+  out.push('-c:v', 'libx264', '-preset', o.fast ? 'ultrafast' : 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-t', T, 'out.mp4');
+  return [...args, ...out];
+}
+/*BUILD_END*/
+
+/* ---------- প্রিভিউ: ffmpeg এর হিসাবের সাথে হুবহু একই গণিত ---------- */
+const V = [null, null], CROP = [null, null], FULL = { x: 0, y: 0, w: 1, h: 1 };
+/*CROP_START*/
+// কালো বর্ডার ধরা: কয়েকটা ফ্রেমে যে সারি/কলামে উজ্জ্বল পিক্সেল আছে সেটাই আসল কনটেন্ট
+function bboxFromFrames(frames, sw, sh) {
+  const rows = new Float32Array(sh), cols = new Float32Array(sw);
+  for (const d of frames) for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    const i = (y * sw + x) * 4;
+    if (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11 > 12) { rows[y]++; cols[x]++; }
+  }
+  const n = frames.length, ry = 0.04 * sw * n, cx = 0.04 * sh * n;       // সারির ৪% এর বেশি উজ্জ্বল হলে কনটেন্ট
+  const first = (a, t) => a.findIndex(v => v > t), last = (a, t) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] > t) return i; return -1; };
+  const y0 = first(rows, ry), y1 = last(rows, ry), x0 = first(cols, cx), x1 = last(cols, cx);
+  if (y0 < 0 || x0 < 0 || y1 <= y0 || x1 <= x0) return FULL;
+  const f = { x: x0 / sw, y: y0 / sh, w: (x1 - x0 + 1) / sw, h: (y1 - y0 + 1) / sh };
+  return f.w * f.h > 0.97 ? FULL : f;
+}
+/*CROP_END*/
+async function detectCrop(v) {
+  const sw = 160, sh = Math.max(2, Math.round(160 * v.videoHeight / v.videoWidth)), c = document.createElement('canvas'); c.width = sw; c.height = sh;
+  const g = c.getContext('2d', { willReadFrequently: true }), frames = [];
+  for (let k = 0; k < 8; k++) {
+    v.currentTime = Math.min(v.duration - 0.1, v.duration * (k + 0.5) / 8); await new Promise(r => v.onseeked = r);
+    g.drawImage(v, 0, 0, sw, sh); frames.push(g.getImageData(0, 0, sw, sh).data);
+  }
+  return bboxFromFrames(frames, sw, sh);
+}
+function load(i, file) {
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(file);
+  v.onloadedmetadata = async () => {
+    V[i] = v; CROP[i] = await detectCrop(v); const c = CROP[i];
+    $('c' + (i + 1)).textContent = c.w * c.h < 0.99 ? `কালো বর্ডার ধরা পড়েছে, ${Math.round((1 - c.w * c.h) * 100)}% অংশ কেটে বাদ` : 'কালো বর্ডার নেই';
+    $('pt').max = Math.max(1, Math.min(V[0]?.duration || 99, V[1]?.duration || 99)).toFixed(1); drawPreview();
+  };
+}
+function drawSlot(g, v, s, x0, y0, w, h) {
+  const c = s.cr, sx = c.x * v.videoWidth, sy = c.y * v.videoHeight, sw = c.w * v.videoWidth, sh = c.h * v.videoHeight;
+  const sc = Math.max(w / sw, h / sh) * s.z, dw = sw * sc, dh = sh * sc;
+  g.save(); g.beginPath(); g.rect(x0, y0, w, h); g.clip(); g.drawImage(v, sx, sy, sw, sh, x0 - (dw - w) * s.x, y0 - (dh - h) * s.y, dw, dh); g.restore();
+}
+const slot = n => ({ z: +$('z' + n).value, x: +$('x' + n).value, y: +$('y' + n).value, keep: $('a' + n).checked, cr: $('ac').checked && CROP[n - 1] ? CROP[n - 1] : FULL });
+let PV = 0;
+async function drawPreview() {
+  const my = ++PV, L = layout('hd720'), c = $('pv'), sc = 300 / L.W; c.width = 300; c.height = Math.round(L.H * sc);
+  const g = c.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+  const t = +$('pt').value;
+  for (const [i, y] of [[0, L.y1], [1, L.y2]]) {
+    const v = V[i]; if (!v) continue;
+    v.currentTime = Math.min(t, v.duration - 0.05); await new Promise(r => v.onseeked = r);
+    if (my !== PV) return;
+    drawSlot(g, v, slot(i + 1), 0, y * sc, c.width, L.h * sc);
+  }
+}
+['z1', 'x1', 'y1', 'z2', 'x2', 'y2', 'pt'].forEach(id => $(id).oninput = () => { $('z1v').textContent = (+$('z1').value).toFixed(2); $('z2v').textContent = (+$('z2').value).toFixed(2); $('ptv').textContent = (+$('pt').value).toFixed(1); drawPreview(); });
+$('ac').onchange = drawPreview;
+$('mv').oninput = () => $('mvv').textContent = (+$('mv').value).toFixed(1);
+$('len').onchange = () => $('lenv').hidden = $('len').value !== 'manual';
+$('v1').onchange = e => e.target.files[0] && load(0, e.target.files[0]);
+$('v2').onchange = e => e.target.files[0] && load(1, e.target.files[0]);
+
+/* ---------- ffmpeg ---------- */
+let ff, LASTAUDIO = false; const FFLOG = [];
+async function loadFF() {
+  if (ff) return ff;
+  const { FFmpeg } = FFmpegWASM, { toBlobURL } = FFmpegUtil; ff = new FFmpeg();
+  ff.on('log', ({ message }) => { if (/Stream #.*Audio/.test(message)) LASTAUDIO = true; FFLOG.push(message); if (FFLOG.length > 12) FFLOG.shift(); });
+  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm', wbase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+  await ff.load({ classWorkerURL: await toBlobURL(`${wbase}/814.ffmpeg.js`, 'text/javascript'),
+                  coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+                  wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm') });
+  return ff;
+}
+async function hasAudio(f, name) { LASTAUDIO = false; await f.exec(['-i', name]); return LASTAUDIO; }
+
+$('go').onclick = async () => {
+  const f1 = $('v1').files[0], f2 = $('v2').files[0], mf = $('mu').files[0];
+  if (!f1 || !f2) return log('দুটো ভিডিওই দিন');
+  $('go').disabled = true; $('out').hidden = true;
+  try {
+    const d1 = V[0].duration, d2 = V[1].duration, m = $('len').value;
+    const T = m === 'top' ? d1 : m === 'bottom' ? d2 : m === 'min' ? Math.min(d1, d2) : m === 'max' ? Math.max(d1, d2) : +$('lenv').value || 20;
+    log('ffmpeg লোড হচ্ছে (প্রথমবার ~৩০MB)...');
+    const f = await loadFF(), { fetchFile } = FFmpegUtil;
+    log('ফাইল পড়া হচ্ছে...');
+    await f.writeFile('in1.mp4', await fetchFile(f1)); await f.writeFile('in2.mp4', await fetchFile(f2));
+    if (mf) await f.writeFile('music', await fetchFile(mf));
+    const s1 = slot(1), s2 = slot(2), has1 = s1.keep && await hasAudio(f, 'in1.mp4'), has2 = s2.keep && await hasAudio(f, 'in2.mp4');
+    const q = $('q').value, o = { ...layout(q), T, s1, s2, has1, has2, music: !!mf, mstart: +$('ms').value || 0, mvol: +$('mv').value, freeze: $('short').value === 'freeze', fast: q === 'hd720' };
+    log(`এনকোড শুরু (${T.toFixed(1)} সেকেন্ড, ${o.W}×${o.H})...`);
+    const code = await f.exec(buildSplit(o));
+    if (code !== 0) throw new Error('ffmpeg ব্যর্থ, কোড ' + code);
+    const data = await f.readFile('out.mp4'), url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+    $('res').src = url; $('dl').href = url; $('dl').download = 'split.mp4'; $('out').hidden = false; log('শেষ!');
+    $('out').scrollIntoView();
+  } catch (e) { log('ত্রুটি: ' + (e?.message || e || 'অজানা (সম্ভবত মেমরি কম)')); if (FFLOG.length) log('ffmpeg লগ:\n' + FFLOG.slice(-6).join('\n')); }
+  $('go').disabled = false;
+};
+</script>
+</body>
+</html>
