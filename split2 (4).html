@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Split Screen Editor</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<style>
+:root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--text:#e9ecf1;--dim:#8b93a1;--accent:#5cc8a1}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 12px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+h2{font-size:15px;margin:0 0 6px;color:var(--accent)}
+label{display:block;color:var(--dim);font-size:13px;margin:8px 0 2px}
+input,select,textarea,button,a.btn{width:100%;display:block;font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px}
+input[type=range]{padding:0;border:0}
+button,a.btn{background:var(--accent);color:#06251a;border:0;font-weight:600;margin-top:10px;text-align:center;text-decoration:none}
+button:disabled{opacity:.5}
+.chk{display:flex;align-items:center;gap:8px;color:var(--text);margin:8px 0 0}.chk input{width:auto}
+canvas,video{width:100%;max-width:300px;display:block;margin:8px auto 0;border-radius:8px;background:#000}
+pre{white-space:pre-wrap;color:var(--dim);font-size:12px;margin:8px 0 0;max-height:150px;overflow:auto}
+.mrow{display:flex;gap:6px;align-items:center;margin-top:6px;font-size:13px}.mrow span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button.mini{width:auto;margin:0;padding:3px 10px;background:var(--bg);color:var(--text);border:1px solid var(--line);font-weight:400}
+</style>
+</head>
+<body>
+<h1>Split Screen Editor</h1>
+
+<section>
+  <h2>স্লট ১: উপরের ভিডিও (একাধিক বাছলে ব্যাচ)</h2>
+  <input id="v1" type="file" accept="video/*" multiple><small id="n1" style="color:var(--dim)">একসাথে অনেক গেমপ্লে বাছলে প্রতিটা থেকে আলাদা ভিডিও হবে, একটার পর একটা</small>
+  <label>ভিডিওর কত সেকেন্ড থেকে শুরু হবে</label><input id="ss1" type="number" value="0" min="0" step="0.5">
+  <label>জুম: <b id="z1v">1.0</b>x (১ = ফ্রেম ভরে, বেশি = আরও জুম)</label><input id="z1" type="range" min="1" max="2.5" step="0.05" value="1">
+  <label>বাঁ ↔ ডান</label><input id="x1" type="range" min="0" max="1" step="0.02" value="0.5">
+  <label>ওপর ↔ নিচ</label><input id="y1" type="range" min="0" max="1" step="0.02" value="0.5">
+  <small id="c1" style="color:var(--dim)"></small>
+  <label class="chk"><input type="checkbox" id="a1"> এই ভিডিওর সাউন্ড রাখো</label>
+</section>
+
+<section>
+  <h2>স্লট ২: নিচের ভিডিও (সব ভিডিওতে একই)</h2>
+  <input id="v2" type="file" accept="video/*">
+  <label>ভিডিওর কত সেকেন্ড থেকে শুরু হবে</label><input id="ss2" type="number" value="0" min="0" step="0.5">
+  <label>জুম: <b id="z2v">1.0</b>x</label><input id="z2" type="range" min="1" max="2.5" step="0.05" value="1">
+  <label>বাঁ ↔ ডান</label><input id="x2" type="range" min="0" max="1" step="0.02" value="0.5">
+  <label>ওপর ↔ নিচ (০ = ওপরের অংশ দেখাবে)</label><input id="y2" type="range" min="0" max="1" step="0.02" value="0">
+  <small id="c2" style="color:var(--dim)"></small>
+  <label class="chk"><input type="checkbox" id="a2"> এই ভিডিওর সাউন্ড রাখো</label>
+</section>
+
+<section>
+  <h2>ব্যাকগ্রাউন্ড মিউজিক</h2>
+  <input id="mu" type="file" accept="audio/*,video/*" multiple hidden>
+  <button id="mua" type="button">+ মিউজিক যোগ করো (একটা একটা করে, বা একসাথে অনেক)</button>
+  <div id="mul"></div>
+  <button id="muc" type="button" hidden style="background:#3a3f4a;color:var(--text)">সব মিউজিক মুছো</button>
+  <small id="nm" style="color:var(--dim)">১ম ভিডিওতে ১ম মিউজিক, ২য়তে ২য়, এভাবে। মিউজিক কম হলে আবার প্রথম থেকে</small>
+  <label>মিউজিক কত সেকেন্ড থেকে শুরু হবে</label><input id="ms" type="number" value="0" min="0">
+  <label>ভলিউম: <b id="mvv">1.0</b></label><input id="mv" type="range" min="0.1" max="1.5" step="0.1" value="1">
+</section>
+
+<section>
+  <h2>লোগো / ওয়াটারমার্ক (ঐচ্ছিক)</h2>
+  <input id="lg" type="file" accept="image/*"><small id="lgs" style="color:var(--dim)">লোগো নেই</small>
+  <label class="chk"><input type="checkbox" id="lon" checked> এই ভিডিওতে লোগো বসাও (টিক তুললে লোগো সেভ থাকবে, কিন্তু বসবে না)</label>
+  <label>জায়গা</label><select id="lpos"><option value="tr">ওপরে ডানে</option><option value="tl">ওপরে বামে</option><option value="br">নিচে ডানে</option><option value="bl">নিচে বামে</option></select>
+  <label>সাইজ: <b id="lsv">18</b>%</label><input id="lsize" type="range" min="5" max="45" step="1" value="18">
+  <label>স্বচ্ছতা: <b id="lov">1.0</b></label><input id="lop" type="range" min="0.2" max="1" step="0.1" value="1">
+  <button id="lgx" type="button" style="background:#3a3f4a;color:var(--text)">লোগো মুছে ফেলো</button>
+</section>
+
+<section>
+  <h2>YouTube অটো আপলোড (ঐচ্ছিক)</h2>
+  <label class="chk"><input type="checkbox" id="yt"> ভিডিও বানানো শেষে YouTube-এ শিডিউল করে আপলোড করো</label>
+  <label>Google Client ID</label><input id="ytcid" placeholder="xxxx.apps.googleusercontent.com">
+  <button id="yta" type="button">গুগলে সাইন-ইন করো</button><small id="yts" style="color:var(--dim)">সাইন-ইন হয়নি</small>
+  <label>ভিডিওর তথ্য। প্রতিটা ভিডিওর জন্য একটা ব্লক, ব্লকগুলোর মাঝে একটা লাইনে শুধু === লিখুন</label>
+  <textarea id="ytall" rows="14" placeholder="শিরোনাম: ফ্রি ফায়ার ফ্রি হ্যাক পার্ট ১&#10;বিবরণ: প্রথম লাইন&#10;দ্বিতীয় লাইন, লিংক: https://t.me/example&#10;ট্যাগ: free fire, ff max&#10;===&#10;শিরোনাম: দ্বিতীয় ভিডিওর নাম&#10;বিবরণ: ...&#10;ট্যাগ: ..."></textarea>
+  <small id="ytc" style="color:var(--dim)"></small>
+  <button id="ytv" type="button" style="background:#3a3f4a;color:var(--text)">কীভাবে পড়া হলো দেখো</button>
+  <pre id="ytpre" hidden></pre>
+  <label>প্রথম ভিডিও কখন প্রকাশ হবে</label><input id="ytst" type="datetime-local">
+  <label>প্রতিটার মাঝে কত মিনিট ফাঁক</label><input id="ytiv" type="number" value="30" min="5">
+  <label class="chk"><input type="checkbox" id="ytsh" checked> বিবরণে #Shorts যোগ করো</label>
+  <button id="ytp" type="button" hidden>বাকি ভিডিও YouTube-এ পাঠাও</button>
+</section>
+
+<section>
+  <h2>সেটিংস</h2>
+  <label class="chk"><input type="checkbox" id="ac" checked> ভিডিওর কালো বর্ডার অটো কেটে ফেলো</label>
+  <label>ভিডিওর দৈর্ঘ্য</label>
+  <select id="len"><option value="top">স্লট ১ এর সমান</option><option value="bottom">স্লট ২ এর সমান</option><option value="min">যেটা ছোট</option><option value="max">যেটা বড়</option><option value="manual">নিজে লিখব</option></select>
+  <label>অথবা সরাসরি সেকেন্ড লিখুন (লিখলেই এটা কাজ করবে)</label><input id="lenv" type="number" value="20" min="3" max="120" step="0.5">
+  <label>ছোট ভিডিও শেষ হলে</label>
+  <select id="short"><option value="loop">আবার শুরু থেকে চলবে</option><option value="freeze">শেষ ফ্রেমে থেমে থাকবে</option></select>
+  <label>কোয়ালিটি</label>
+  <select id="q"><option value="hd720">৭২০×১২৮০ (দ্রুত, নিরাপদ)</option><option value="fhd">১০৮০×১৯২০ (রেফারেন্সের মাপ, ধীর, ক্র্যাশ করতে পারে)</option></select>
+</section>
+
+<section>
+  <h2>লেআউট প্রিভিউ</h2>
+  <canvas id="pv"></canvas>
+  <label>প্রিভিউ সময়: <b id="ptv">0.5</b>s</label><input id="pt" type="range" min="0" max="10" step="0.1" value="0.5">
+  <label class="chk"><input type="checkbox" id="auto" checked> প্রতিটা শেষ হলে অটো সেভ</label>
+  <button id="go">ভিডিও বানাও</button>
+  <button id="stop" type="button" hidden style="background:#a33;color:#fff">থামাও</button>
+  <pre id="log"></pre>
+</section>
+
+<section id="out" hidden><div id="outl"></div></section>
+
+<script>
+const $ = id => document.getElementById(id), log = m => { $('log').textContent += m + '\n'; $('log').scrollTop = 1e9; };
+
+/* ---------- লেআউট (রেফারেন্স ভিডিও থেকে মাপা, ১০৮০×১৯২০ এ): ওপরে কালো ১৪px, স্লট ১: ১৪–৯৩৬, স্লট ২: ৯৩৬–১৮৫৮ ---------- */
+const even = n => Math.round(n / 2) * 2;
+function layout(q) {
+  const k = q === 'fhd' ? 1 : 2 / 3, W = even(1080 * k), H = even(1920 * k);
+  const h = even(922 * k), y1 = even(14 * k), y2 = even(936 * k);
+  return { W, H, h, y1, y2 };
+}
+/*BUILD_START*/
+// o: {W,H,h,y1,y2,T,s1:{z,x,y,keep},s2:{z,x,y,keep},music:bool,mstart,mvol,freeze}
+function slotFilter(i, s, o, label) {
+  const Z = s.z.toFixed(3);
+  const c = s.cr, cr = c && c.w * c.h < 0.99 ? `crop=trunc(iw*${c.w.toFixed(4)}/2)*2:trunc(ih*${c.h.toFixed(4)}/2)*2:trunc(iw*${c.x.toFixed(4)}/2)*2:trunc(ih*${c.y.toFixed(4)}/2)*2,` : '';
+  const fin = o.freeze ? `,tpad=stop_mode=clone:stop_duration=${o.T.toFixed(2)}` : '';
+  return `[${i}:v]${cr}scale=${o.W}:${o.h}:force_original_aspect_ratio=increase,scale=trunc(iw*${Z}/2)*2:trunc(ih*${Z}/2)*2,` +
+    `crop=${o.W}:${o.h}:(iw-${o.W})*${s.x}:(ih-${o.h})*${s.y},setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS${fin},trim=duration=${o.T.toFixed(3)},setpts=PTS-STARTPTS[${label}]`;
+}
+function buildSplit(o) {
+  const loop = o.freeze ? [] : ['-stream_loop', '-1'], T = o.T.toFixed(3), args = [], f = [];
+  args.push(...loop, '-ss', String(o.s1.ss || 0), '-t', T, '-i', 'in1.mp4', ...loop, '-ss', String(o.s2.ss || 0), '-t', T, '-i', 'in2.mp4');
+  if (o.music) args.push('-stream_loop', '-1', '-i', 'music');
+  if (o.logo) args.push('-i', o.logo.name);
+  f.push(slotFilter(0, o.s1, o, 't'), slotFilter(1, o.s2, o, 'b'));
+  let tailv = '[o2]';
+  if (o.logo) {
+    const li = o.music ? 3 : 2, M = Math.round(o.W * 0.03), pos = { tl: `${M}:${M}`, tr: `W-w-${M}:${M}`, bl: `${M}:H-h-${M}`, br: `W-w-${M}:H-h-${M}` }[o.logo.pos] || `W-w-${M}:${M}`;
+    f.push(`[${li}:v]scale=${even(o.W * o.logo.size / 100)}:-2,format=rgba,colorchannelmixer=aa=${o.logo.op}[lg]`);
+    tailv = `[o2][lg]overlay=${pos}[o3];[o3]`;
+  }
+  f.push(`color=c=black:s=${o.W}x${o.H}:r=30:d=${T}[bg];[bg][t]overlay=0:${o.y1}[o1];[o1][b]overlay=0:${o.y2}[o2];${tailv}fade=t=in:st=0:d=0.15,format=yuv420p[vout]`);
+  const parts = [];
+  if (o.s1.keep && o.has1) { f.push(`[0:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:${T},asetpts=PTS-STARTPTS[g1]`); parts.push('[g1]'); }
+  if (o.s2.keep && o.has2) { f.push(`[1:a]aresample=44100,aformat=channel_layouts=stereo,atrim=0:${T},asetpts=PTS-STARTPTS[g2]`); parts.push('[g2]'); }
+  if (o.music) { f.push(`[2:a]atrim=start=${o.mstart},asetpts=PTS-STARTPTS,atrim=0:${T},volume=${o.mvol},aresample=44100,aformat=channel_layouts=stereo[mu]`); parts.push('[mu]'); }
+  let a = null;
+  if (parts.length > 1) { f.push(`${parts.join('')}amix=inputs=${parts.length}:duration=longest:dropout_transition=0:normalize=0[mx]`); a = 'mx'; }
+  else if (parts.length === 1) a = parts[0].slice(1, -1);
+  if (a) f.push(`[${a}]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=44100,afade=t=out:st=${Math.max(0, o.T - 0.4).toFixed(2)}:d=0.4[aout]`);
+  const out = ['-filter_complex', f.join(';'), '-map', '[vout]'];
+  if (a) out.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
+  out.push('-c:v', 'libx264', '-preset', o.fast ? 'ultrafast' : 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-t', T, 'out.mp4');
+  return [...args, ...out];
+}
+/*BUILD_END*/
+
+/* ---------- প্রিভিউ: ffmpeg এর হিসাবের সাথে হুবহু একই গণিত ---------- */
+const V = [null, null], CROP = [null, null], FULL = { x: 0, y: 0, w: 1, h: 1 };
+/*CROP_START*/
+// কালো বর্ডার ধরা: কয়েকটা ফ্রেমে যে সারি/কলামে উজ্জ্বল পিক্সেল আছে সেটাই আসল কনটেন্ট
+function bboxFromFrames(frames, sw, sh) {
+  const rows = new Float32Array(sh), cols = new Float32Array(sw);
+  for (const d of frames) for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    const i = (y * sw + x) * 4;
+    if (d[i] * .3 + d[i + 1] * .59 + d[i + 2] * .11 > 12) { rows[y]++; cols[x]++; }
+  }
+  const n = frames.length, ry = 0.04 * sw * n, cx = 0.04 * sh * n;       // সারির ৪% এর বেশি উজ্জ্বল হলে কনটেন্ট
+  const first = (a, t) => a.findIndex(v => v > t), last = (a, t) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] > t) return i; return -1; };
+  const y0 = first(rows, ry), y1 = last(rows, ry), x0 = first(cols, cx), x1 = last(cols, cx);
+  if (y0 < 0 || x0 < 0 || y1 <= y0 || x1 <= x0) return FULL;
+  const f = { x: x0 / sw, y: y0 / sh, w: (x1 - x0 + 1) / sw, h: (y1 - y0 + 1) / sh };
+  return f.w * f.h > 0.97 ? FULL : f;
+}
+/*CROP_END*/
+async function detectCrop(v) {
+  const sw = 160, sh = Math.max(2, Math.round(160 * v.videoHeight / v.videoWidth)), c = document.createElement('canvas'); c.width = sw; c.height = sh;
+  const g = c.getContext('2d', { willReadFrequently: true }), frames = [];
+  for (let k = 0; k < 8; k++) {
+    v.currentTime = Math.min(v.duration - 0.1, v.duration * (k + 0.5) / 8); await new Promise(r => v.onseeked = r);
+    g.drawImage(v, 0, 0, sw, sh); frames.push(g.getImageData(0, 0, sw, sh).data);
+  }
+  return bboxFromFrames(frames, sw, sh);
+}
+function load(i, file) {
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(file);
+  v.onloadedmetadata = async () => {
+    V[i] = v; CROP[i] = await detectCrop(v); syncLen(); const c = CROP[i];
+    $('c' + (i + 1)).textContent = c.w * c.h < 0.99 ? `কালো বর্ডার ধরা পড়েছে, ${Math.round((1 - c.w * c.h) * 100)}% অংশ কেটে বাদ` : 'কালো বর্ডার নেই';
+    $('pt').max = Math.max(1, Math.min(V[0]?.duration || 99, V[1]?.duration || 99)).toFixed(1); drawPreview();
+  };
+}
+function drawSlot(g, v, s, x0, y0, w, h) {
+  const c = s.cr, sx = c.x * v.videoWidth, sy = c.y * v.videoHeight, sw = c.w * v.videoWidth, sh = c.h * v.videoHeight;
+  const sc = Math.max(w / sw, h / sh) * s.z, dw = sw * sc, dh = sh * sc;
+  g.save(); g.beginPath(); g.rect(x0, y0, w, h); g.clip(); g.drawImage(v, sx, sy, sw, sh, x0 - (dw - w) * s.x, y0 - (dh - h) * s.y, dw, dh); g.restore();
+}
+const slot = n => ({ ss: +$('ss' + n).value || 0, z: +$('z' + n).value, x: +$('x' + n).value, y: +$('y' + n).value, keep: $('a' + n).checked, cr: $('ac').checked && CROP[n - 1] ? CROP[n - 1] : FULL });
+let PV = 0;
+async function drawPreview() {
+  const my = ++PV, L = layout('hd720'), c = $('pv'), sc = 300 / L.W; c.width = 300; c.height = Math.round(L.H * sc);
+  const g = c.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, c.width, c.height);
+  const t = +$('pt').value;
+  for (const [i, y] of [[0, L.y1], [1, L.y2]]) {
+    const v = V[i]; if (!v) continue;
+    v.currentTime = Math.min(t + (+$('ss' + (i + 1)).value || 0), v.duration - 0.05); await new Promise(r => v.onseeked = r);
+    if (my !== PV) return;
+    drawSlot(g, v, slot(i + 1), 0, y * sc, c.width, L.h * sc);
+  }
+  if (LOGO.img && $('lon').checked) {
+    const lw = c.width * (+$('lsize').value) / 100, lh = lw * LOGO.img.naturalHeight / LOGO.img.naturalWidth, m = c.width * 0.03, p = $('lpos').value;
+    g.globalAlpha = +$('lop').value; g.drawImage(LOGO.img, p.endsWith('l') ? m : c.width - lw - m, p.startsWith('t') ? m : c.height - lh - m, lw, lh); g.globalAlpha = 1;
+  }
+}
+['z1', 'x1', 'y1', 'z2', 'x2', 'y2', 'pt'].forEach(id => $(id).oninput = () => { $('z1v').textContent = (+$('z1').value).toFixed(2); $('z2v').textContent = (+$('z2').value).toFixed(2); $('ptv').textContent = (+$('pt').value).toFixed(1); drawPreview(); });
+$('ac').onchange = drawPreview;
+$('mv').oninput = () => $('mvv').textContent = (+$('mv').value).toFixed(1);
+function calcT(r1 = V[0]?.duration, r2 = V[1]?.duration) {
+  const d1 = r1 != null ? Math.max(1, r1 - (+$('ss1').value || 0)) : undefined, d2 = r2 != null ? Math.max(1, r2 - (+$('ss2').value || 0)) : undefined, m = $('len').value;
+  if (m === 'manual') return +$('lenv').value || 20;
+  const a = d1 ?? d2, b = d2 ?? d1; if (a == null) return null;
+  return m === 'top' ? a : m === 'bottom' ? b : m === 'min' ? Math.min(a, b) : Math.max(a, b);
+}
+function syncLen() { const t = calcT(); if ($('len').value !== 'manual' && t) $('lenv').value = t.toFixed(1); }
+$('len').onchange = syncLen;
+$('lenv').oninput = () => { $('len').value = 'manual'; };
+$('v1').onchange = e => { const n = e.target.files.length; if (n) load(0, e.target.files[0]); $('n1').textContent = n > 1 ? `${n}টা ভিডিও বাছা হয়েছে, ${n}টা ভিডিও বানানো হবে। প্রিভিউ প্রথমটার` : 'একসাথে অনেক গেমপ্লে বাছলে প্রতিটা থেকে আলাদা ভিডিও হবে, একটার পর একটা'; };
+const MUS = [];
+function renderMus() {
+  const box = $('mul'); box.innerHTML = '';
+  const btn = (txt, fn) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = txt; b.className = 'mini'; b.onclick = fn; return b; };
+  MUS.forEach((m, i) => {
+    const row = document.createElement('div'), t = document.createElement('span'); row.className = 'mrow'; t.textContent = `${i + 1}. ${m.name}`;
+    row.append(t, btn('↑', () => { if (i > 0) { [MUS[i - 1], MUS[i]] = [MUS[i], MUS[i - 1]]; renderMus(); } }),
+      btn('↓', () => { if (i < MUS.length - 1) { [MUS[i + 1], MUS[i]] = [MUS[i], MUS[i + 1]]; renderMus(); } }), btn('✕', () => { MUS.splice(i, 1); renderMus(); }));
+    box.append(row);
+  });
+  $('muc').hidden = !MUS.length;
+}
+$('mua').onclick = () => $('mu').click();
+$('mu').onchange = e => { for (const f of e.target.files) if (!MUS.some(m => m.name === f.name && m.size === f.size)) MUS.push(f); e.target.value = ''; renderMus(); };
+$('muc').onclick = () => { MUS.length = 0; renderMus(); };
+$('v2').onchange = e => e.target.files[0] && load(1, e.target.files[0]);
+
+/* ---------- লোগো ও সেটিংস মনে রাখা ---------- */
+const LOGO = { img: null, blob: null, ext: 'png' };
+async function setLogo(blob, save) {
+  LOGO.blob = blob; LOGO.ext = blob.type.includes('jpeg') ? 'jpg' : 'png';
+  const url = URL.createObjectURL(blob), img = new Image(); img.src = url; await img.decode(); LOGO.img = img;
+  $('lgs').textContent = 'লোগো আছে (ফোনে সেভ থাকবে)';
+  if (save) { try { const fr = new FileReader(); fr.onload = () => { try { localStorage.setItem('split-logo', fr.result); } catch { $('lgs').textContent = 'লোগো আছে (বড় ফাইল, সেভ হয়নি)'; } }; fr.readAsDataURL(blob); } catch {} }
+  drawPreview();
+}
+$('lg').onchange = e => e.target.files[0] && setLogo(e.target.files[0], true);
+$('lgx').onclick = () => { LOGO.img = null; LOGO.blob = null; try { localStorage.removeItem('split-logo'); } catch {} $('lgs').textContent = 'লোগো নেই'; drawPreview(); };
+try { const d = localStorage.getItem('split-logo'); if (d) fetch(d).then(r => r.blob()).then(b => setLogo(b, false)); } catch {}
+
+const KEEP = ['z1', 'x1', 'y1', 'a1', 'ss1', 'z2', 'x2', 'y2', 'a2', 'ss2', 'ms', 'mv', 'len', 'lenv', 'short', 'q', 'ac', 'lon', 'auto', 'lpos', 'lsize', 'lop', 'yt', 'ytcid', 'ytall', 'ytiv', 'ytsh'];
+function saveSettings() { try { const o = {}; KEEP.forEach(id => { const e = $(id); o[id] = e.type === 'checkbox' ? e.checked : e.value; }); localStorage.setItem('split-settings', JSON.stringify(o)); } catch {} }
+function refreshLabels() { $('z1v').textContent = (+$('z1').value).toFixed(2); $('z2v').textContent = (+$('z2').value).toFixed(2); $('mvv').textContent = (+$('mv').value).toFixed(1); $('lsv').textContent = $('lsize').value; $('lov').textContent = (+$('lop').value).toFixed(1); }
+try { const o = JSON.parse(localStorage.getItem('split-settings') || '{}'); KEEP.forEach(id => { if (id in o) { const e = $(id); if (e.type === 'checkbox') e.checked = o[id]; else e.value = o[id]; } }); } catch {}
+refreshLabels();
+KEEP.forEach(id => { const ev = () => { refreshLabels(); saveSettings(); if (['ss1', 'ss2'].includes(id)) syncLen(); if (['lsize', 'lop', 'lpos', 'lon', 'ss1', 'ss2'].includes(id)) drawPreview(); }; $(id).addEventListener('input', ev); $(id).addEventListener('change', ev); });
+
+/* ---------- ffmpeg ---------- */
+/* ffmpeg ফাইল একবার নামিয়ে ফোনে জমিয়ে রাখা, পরের বার আর ডাউনলোড লাগে না */
+async function cachedBlob(url, mime) {
+  try {
+    const c = await caches.open('ffmpeg-core-v1'); let r = await c.match(url);
+    if (r) log('ffmpeg ফোনের জমানো ফাইল থেকে লোড হচ্ছে...');
+    else { log('ffmpeg প্রথমবার নামছে (একবারই লাগবে)...'); r = await fetch(url); if (!r.ok) throw 0; await c.put(url, r.clone()); }
+    return URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: mime }));
+  } catch { return FFmpegUtil.toBlobURL(url, mime); }
+}
+try { navigator.storage?.persist?.(); } catch {}
+let ff, LASTAUDIO = false; const FFLOG = [];
+async function loadFF() {
+  if (ff) return ff;
+  const { FFmpeg } = FFmpegWASM, { toBlobURL } = FFmpegUtil; ff = new FFmpeg();
+  ff.on('log', ({ message }) => { if (/Stream #.*Audio/.test(message)) LASTAUDIO = true; FFLOG.push(message); if (FFLOG.length > 12) FFLOG.shift(); });
+  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm', wbase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+  await ff.load({ classWorkerURL: await cachedBlob(`${wbase}/814.ffmpeg.js`, 'text/javascript'),
+                  coreURL: await cachedBlob(`${base}/ffmpeg-core.js`, 'text/javascript'),
+                  wasmURL: await cachedBlob(`${base}/ffmpeg-core.wasm`, 'application/wasm') });
+  return ff;
+}
+async function hasAudio(f, name) { LASTAUDIO = false; await f.exec(['-i', name]); return LASTAUDIO; }
+
+/* ---------- YouTube শিডিউল আপলোড ---------- */
+/*YT_START*/
+// ব্লক ফরম্যাট: শিরোনাম: ... / বিবরণ: ... (একাধিক লাইন চলবে) / ট্যাগ: ... ; ব্লকের মাঝে === লাইন
+function ytParse(text) {
+  const blocks = text.split(/^\s*===\s*$/m).map(b => b.trim()).filter(Boolean), items = [], warns = [];
+  blocks.forEach((b, k) => {
+    let title = '', tags = '', mode = null; const desc = [], n = k + 1;
+    for (const line of b.split('\n')) {
+      let m;
+      // লেবেল শুধু ক্রমে চেনা হয় (শিরোনাম → বিবরণ → ট্যাগ), তাই বিবরণের ভেতরের "Title:" ধরনের লেখা বিবরণই থাকে
+      if (mode === null && (m = line.match(/^\s*(শিরোনাম|title)\s*[:：]\s*(.*)$/i))) { mode = 't'; title = m[2].trim(); }
+      else if ((mode === null || mode === 't') && (m = line.match(/^\s*(বিবরণ|description|desc)\s*[:：]\s*(.*)$/i))) { mode = 'd'; if (m[2].trim()) desc.push(m[2]); }
+      else if ((m = line.match(/^\s*(ট্যাগ|tags?)\s*[:：]\s*(.*)$/i))) { mode = 'g'; tags += (tags ? ',' : '') + m[2]; }
+      else if (mode === 'd') desc.push(line);
+      else if (mode === 'g') tags += ',' + line;
+      else if (mode === 't') title += (title ? ' ' : '') + line.trim();
+      else if (line.trim()) warns.push(`ব্লক ${n}: লেবেল ছাড়া লেখা বাদ গেছে ("${line.trim().slice(0, 25)}")`);
+    }
+    const d = desc.join('\n').trim(), tg = tags.split(',').map(t => t.trim().replace(/^#/, '')).filter(Boolean);
+    if (!title) warns.push(`ব্লক ${n}: "শিরোনাম:" নেই, "Video ${n}" নাম হবে`);
+    if (title.length > 100) warns.push(`ব্লক ${n}: শিরোনাম ${title.length} অক্ষর, ১০০ এর পরের অংশ কাটা যাবে`);
+    if (/[<>]/.test(title + d)) warns.push(`ব্লক ${n}: < বা > চিহ্ন বাদ যাবে`);
+    if (d.length > 4900) warns.push(`ব্লক ${n}: বিবরণ খুব বড়, কাটা যাবে`);
+    if (tg.join(',').length > 480) warns.push(`ব্লক ${n}: ট্যাগ ৫০০ অক্ষরের বেশি, শেষের কিছু বাদ যাবে`);
+    items.push({ title, desc: d, tags: tg });
+  });
+  return { items, warns };
+}
+function ytMeta(i, items, startMs, ivMin, shorts, nowMs = Date.now()) {
+  const it = items.length ? items[i % items.length] : { title: '', desc: '', tags: [] };
+  const title = (it.title || 'Video ' + (i + 1)).replace(/[<>]/g, '').slice(0, 100);
+  let desc = (it.desc || '').replace(/[<>]/g, '');
+  if (shorts && !/#shorts/i.test(title + desc)) desc += (desc ? '\n\n' : '') + '#Shorts';
+  let tot = 0; const tags = it.tags.filter(t => (tot += t.length + 1) <= 480);
+  const at = Math.max(startMs + i * ivMin * 60000, nowMs + 10 * 60000);
+  return { snippet: { title, description: desc.slice(0, 4900), tags, categoryId: '20' }, status: { privacyStatus: 'private', publishAt: new Date(at).toISOString(), selfDeclaredMadeForKids: false } };
+}
+/*YT_END*/
+function ytStatus() {
+  const { items, warns } = ytParse($('ytall').value);
+  $('ytc').textContent = items.length ? `${items.length}টা ভিডিওর তথ্য পাওয়া গেছে` + (warns.length ? ' | ⚠ ' + warns.slice(0, 3).join(' ; ') : ' ✓') : 'এখনো কোনো তথ্য নেই';
+}
+$('ytall').addEventListener('input', ytStatus); ytStatus();
+$('ytv').onclick = () => {
+  const { items, warns } = ytParse($('ytall').value), box = $('ytpre'); box.hidden = !box.hidden; if (box.hidden) return;
+  box.textContent = (items.length ? items.map((x, i) => `━━ ভিডিও ${i + 1} ━━\nশিরোনাম: ${x.title || '(নেই)'}\nবিবরণ:\n${x.desc || '(নেই)'}\nট্যাগ: ${x.tags.join(' | ') || '(নেই)'}`).join('\n\n') : 'কোনো তথ্য নেই') + (warns.length ? '\n\n⚠ ' + warns.join('\n⚠ ') : '');
+  box.style.maxHeight = '320px';
+};
+let TOKEN = null, TEXP = 0, YT_START = 0, YTQ = Promise.resolve(); const PENDING = [];
+const tokenOK = () => TOKEN && Date.now() < TEXP;
+$('ytst').value = (() => { const d = new Date(Date.now() + 30 * 60000); d.setSeconds(0, 0); d.setMinutes(Math.ceil(d.getMinutes() / 5) * 5); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); })();
+$('yta').onclick = () => {
+  const cid = $('ytcid').value.trim(); if (!cid) return log('আগে Google Client ID দিন');
+  if (!window.google?.accounts?.oauth2) return log('গুগল সাইন-ইন লোড হয়নি, ইন্টারনেট দেখে পেজ রিফ্রেশ করুন');
+  window.google.accounts.oauth2.initTokenClient({ client_id: cid, scope: 'https://www.googleapis.com/auth/youtube.upload',
+    callback: r => { if (r.access_token) { TOKEN = r.access_token; TEXP = Date.now() + ((r.expires_in || 3600) - 120) * 1000; $('yts').textContent = 'সাইন-ইন হয়েছে ✓ (প্রায় ১ ঘণ্টা চলবে)'; log('YouTube সাইন-ইন হয়েছে'); } else log('সাইন-ইন ব্যর্থ: ' + (r.error || 'অজানা')); } }).requestAccessToken();
+};
+async function ytUpload(blob, i) {
+  const meta = ytMeta(i, ytParse($('ytall').value).items, YT_START, +$('ytiv').value || 30, $('ytsh').checked);
+  const r = await fetch('https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status', { method: 'POST',
+    headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json; charset=UTF-8', 'X-Upload-Content-Length': String(blob.size), 'X-Upload-Content-Type': 'video/mp4' }, body: JSON.stringify(meta) });
+  if (!r.ok) { const e = new Error('YouTube ' + r.status + ' ' + (await r.text()).slice(0, 220)); e.status = r.status; throw e; }
+  const loc = r.headers.get('Location'); if (!loc) throw new Error('আপলোড লিংক পাওয়া যায়নি');
+  const u = await fetch(loc, { method: 'PUT', headers: { 'Content-Type': 'video/mp4' }, body: blob });
+  if (!u.ok) { const e = new Error('আপলোড ব্যর্থ ' + u.status); e.status = u.status; throw e; }
+  const j = await u.json(); return { id: j.id, at: meta.status.publishAt, title: meta.snippet.title };
+}
+async function doUp(blob, i, card) {
+  if (!tokenOK()) { PENDING.push({ blob, i, card }); card.note.textContent = 'YouTube: সাইন-ইনের মেয়াদ শেষ, নিচে "বাকি ভিডিও পাঠাও" চাপুন'; $('ytp').hidden = false; return; }
+  card.note.textContent = 'YouTube-এ আপলোড হচ্ছে...';
+  try { const r = await ytUpload(blob, i); card.note.textContent = `YouTube ✓ শিডিউল: ${new Date(r.at).toLocaleString('bn-BD')} | ${r.title} | https://youtu.be/${r.id}`; log(`ভিডিও ${i + 1} YouTube-এ শিডিউল হয়েছে ✓`); }
+  catch (e) { card.note.textContent = 'YouTube ত্রুটি: ' + (e?.message || e); log('YouTube ত্রুটি: ' + (e?.message || e)); if (e?.status === 401) { TOKEN = null; PENDING.push({ blob, i, card }); $('ytp').hidden = false; } }
+}
+$('ytp').onclick = async () => { if (!tokenOK()) return log('আগে "গুগলে সাইন-ইন করো" চাপুন'); const list = PENDING.splice(0); for (const p of list) await doUp(p.blob, p.i, p.card); $('ytp').hidden = !PENDING.length; };
+
+let STOP = false;
+async function probeFile(file) {
+  const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(file);
+  await new Promise((r, j) => { v.onloadedmetadata = r; v.onerror = () => j(new Error('ভিডিও খোলা যায়নি: ' + file.name)); });
+  return v;
+}
+function addResult(blob, name) {
+  const url = URL.createObjectURL(blob), d = document.createElement('div'), v = document.createElement('video'), a = document.createElement('a');
+  v.src = url; v.controls = true; v.playsInline = true; a.href = url; a.download = name; a.className = 'btn'; a.textContent = 'ডাউনলোড: ' + name;
+  const note = document.createElement('small'); note.style.color = 'var(--dim)';
+  d.append(v, a, note); $('outl').append(d); if ($('auto').checked) a.click();
+  return { note };
+}
+$('stop').onclick = () => { STOP = true; log('থামানো হচ্ছে (চলতি ভিডিও শেষ হলে)...'); };
+$('go').onclick = async () => {
+  const g1 = [...$('v1').files], f2 = $('v2').files[0], mus = [...MUS];
+  if (!g1.length || !f2) return log('স্লট ১ এ ভিডিও (একাধিক হলে ব্যাচ) আর স্লট ২ এ ভিডিও দিন');
+  if ($('yt').checked && !tokenOK()) return log('YouTube আপলোড চালু আছে, আগে "গুগলে সাইন-ইন করো" চাপুন');
+  if ($('yt').checked) {
+    const n = ytParse($('ytall').value).items.length;
+    if (!n) return log('YouTube তথ্য খালি, "ভিডিওর তথ্য" ঘরে লিখুন');
+    if (n < g1.length) log(`সতর্কতা: ${g1.length}টা ভিডিও কিন্তু তথ্য ${n}টা, শেষে আবার প্রথম থেকে ঘুরবে`);
+  }
+  YT_START = Math.max(new Date($('ytst').value).getTime() || 0, Date.now() + 15 * 60000);
+  $('go').disabled = true; $('stop').hidden = false; STOP = false; $('outl').innerHTML = ''; $('out').hidden = false;
+  let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch {}
+  let done = 0;
+  try {
+    log('ffmpeg লোড হচ্ছে (প্রথমবার ~৩০MB)...');
+    const f = await loadFF(), { fetchFile } = FFmpegUtil;
+    await f.writeFile('in2.mp4', await fetchFile(f2));
+    const useLogo = LOGO.blob && $('lon').checked;
+    if (useLogo) await f.writeFile('logo.' + LOGO.ext, new Uint8Array(await LOGO.blob.arrayBuffer()));
+    const q = $('q').value, s2 = slot(2), has2 = s2.keep && await hasAudio(f, 'in2.mp4'), v2 = await probeFile(f2);
+    for (let i = 0; i < g1.length && !STOP; i++) {
+      const tag = `[${i + 1}/${g1.length}]`, g = g1[i], mf = mus.length ? mus[i % mus.length] : null;
+      try {
+        log(`${tag} ${g.name}${mf ? ' + ' + mf.name : ''}`);
+        const v1 = await probeFile(g), s1 = slot(1); s1.cr = $('ac').checked ? await detectCrop(v1) : FULL;
+        const T = calcT(v1.duration, v2.duration); if (!(T >= 1)) throw new Error('দৈর্ঘ্য ঠিক নেই');
+        await f.writeFile('in1.mp4', await fetchFile(g)); if (mf) await f.writeFile('music', await fetchFile(mf));
+        const has1 = s1.keep && await hasAudio(f, 'in1.mp4');
+        const o = { ...layout(q), T, s1, s2, has1, has2, logo: useLogo ? { name: 'logo.' + LOGO.ext, pos: $('lpos').value, size: +$('lsize').value, op: +$('lop').value } : null,
+          music: !!mf, mstart: +$('ms').value || 0, mvol: +$('mv').value, freeze: $('short').value === 'freeze', fast: q === 'hd720' };
+        log(`${tag} এনকোড শুরু (${T.toFixed(1)} সেকেন্ড, ${o.W}×${o.H})...`);
+        const code = await f.exec(buildSplit(o));
+        if (code !== 0) throw new Error('ffmpeg ব্যর্থ, কোড ' + code);
+        const data = await f.readFile('out.mp4'); await f.deleteFile('out.mp4');
+        const outBlob = new Blob([data.buffer], { type: 'video/mp4' }), card = addResult(outBlob, g.name.replace(/\.[^.]+$/, '') + '_split.mp4'); done++;
+        if ($('yt').checked) YTQ = YTQ.then(() => doUp(outBlob, i, card));
+        log(`${tag} শেষ ✓`); URL.revokeObjectURL(v1.src);
+        if (i === 0) $('out').scrollIntoView();
+      } catch (e) { log(`${tag} ত্রুটি: ${e?.message || e || 'অজানা (সম্ভবত মেমরি কম)'}`); if (FFLOG.length) log(FFLOG.slice(-4).join('\n')); }
+    }
+    await YTQ;
+    log(STOP ? `থামানো হয়েছে (${done}টা হয়েছে)` : `সব শেষ! ${done}/${g1.length}টা ভিডিও তৈরি`);
+  } catch (e) { log('ত্রুটি: ' + (e?.message || e || 'অজানা')); }
+  try { lock?.release?.(); } catch {}
+  $('stop').hidden = true; $('go').disabled = false;
+};
+</script>
+</body>
+</html>
